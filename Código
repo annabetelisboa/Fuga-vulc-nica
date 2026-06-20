@@ -1,0 +1,458 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd1(0x25, 16, 2); 
+LiquidCrystal_I2C lcd2(0x26, 16, 2); 
+LiquidCrystal_I2C lcd3(0x27, 16, 2); 
+LiquidCrystal_I2C lcd4(0x24, 16, 2); 
+
+LiquidCrystal_I2C* lcds[4] = { &lcd1, &lcd2, &lcd3, &lcd4 };
+
+const int pinbotao[4] = {2, 3, 4, 5};   
+const int pinoBotaoExtra = 6;           
+
+const int pinoLeds[30] = {
+  22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+  32, 33, 34, 35, 36, 37, 38, 39, 41, 42,
+  43, 44, 45, 46, 47, 48, 49, 50, 51, 52
+};
+
+int jogadorAtual = 0; 
+const int MAX_CASAS = 30;
+const int voltasNecessarias = 2; 
+const int voltasMaximas = 3; 
+const int habilidadesIniciais = 2; 
+const int ARTEFATOS_NECESSARIOS = 4;
+const int CHANCE_CARTA_ACAO = 20; 
+
+int posicoes[4] = {1, 1, 1, 1};
+int voltasAtuais[4] = {0, 0, 0, 0};
+int artefatosEquipe = 0; 
+int habilidadesRestantes[4] = {0, 0, 0, 0}; 
+
+bool precisaAtualizarLcd = true;
+
+const char* nomeDino[4] = { "T-REX", "VELOCIRAPTOR", "PTERODACTIL", "TRICERATOPS" };
+
+const int mapaTabuleiro[30] = {
+  0, 0, 0, 0, 0, 
+  1, 1, 0, 0, 2,
+  0, 2, 0, 1, 0,
+  2, 0, 2, 0, 0, 
+  1, 0, 2, 1, 0, 
+  2, 2, 0, 0, 0
+};
+
+void resetarJogo();
+void modoStandby();
+void mostrarVezNoLCD();
+int girarDado(int jogador, bool &habilidadeAtivada);
+void efeitoDadoGirando();
+void mostrarStatusNoLCD(const char* l1, const char* l2); 
+bool verificarCartaDeAcao(int jogador);
+bool processarMovimento(int jogador, int dado, bool usouHabilidade);
+bool alterarPosicaoMecanica(int jogador, int casas);
+bool executarEfeitosDeCasa(int jogador, bool imuneTRex);
+void atualizarTabuleiroFisico();
+void processarVitoria();
+void processarDerrota();
+void aguardarConfirmacaoFimDeJogada(int jogador);
+
+void setup() {
+  Serial.begin(9600);
+  
+  for (int i = 0; i < 4; i++) { pinMode(pinbotao[i], INPUT_PULLUP); }
+  pinMode(pinoBotaoExtra, INPUT_PULLUP);
+  
+  for (int i = 0; i < 30; i++) {
+    pinMode(pinoLeds[i], OUTPUT);
+    digitalWrite(pinoLeds[i], LOW); 
+  }
+  
+  for (int i = 0; i < 4; i++) {
+    lcds[i]->init();
+    lcds[i]->backlight();
+  }
+  
+  randomSeed(analogRead(A0) ^ analogRead(A1) ^ analogRead(A2) ^ micros());
+  modoStandby(); 
+}
+
+void loop() {
+  if (precisaAtualizarLcd) {
+    mostrarVezNoLCD(); 
+    precisaAtualizarLcd = false;
+  }
+
+  bool usouHabilidade = false;
+  int valorDoDado = girarDado(jogadorAtual, usouHabilidade); 
+  
+  if (valorDoDado > 0) { 
+    if (processarMovimento(jogadorAtual, valorDoDado, usouHabilidade)) {
+
+      aguardarConfirmacaoFimDeJogada(jogadorAtual);
+
+      int idxAtual = posicoes[jogadorAtual] - 1;
+      if (idxAtual >= 0 && idxAtual < 30) digitalWrite(pinoLeds[idxAtual], LOW);
+
+      jogadorAtual = (jogadorAtual + 1) % 4; 
+      precisaAtualizarLcd = true;
+    }
+  }
+}
+
+int girarDado(int jogador, bool &habilidadeAtivada) {
+  habilidadeAtivada = false;
+  unsigned long tempoInicioEspera = millis();
+  unsigned long tempoPisca = millis();
+  bool estadoPisca = true;
+
+  bool botaoJogadorPronto = (digitalRead(pinbotao[jogador]) == HIGH);
+  bool botaoExtraPronto = (digitalRead(pinoBotaoExtra) == HIGH);
+
+  while (true) {
+    if (millis() - tempoInicioEspera > 300000) {
+      resetarJogo();
+      return 0;
+    }
+
+    if (!botaoJogadorPronto && digitalRead(pinbotao[jogador]) == HIGH) botaoJogadorPronto = true;
+    if (!botaoExtraPronto && digitalRead(pinoBotaoExtra) == HIGH) botaoExtraPronto = true;
+
+    if (millis() - tempoPisca > 250) {
+      tempoPisca = millis();
+      estadoPisca = !estadoPisca;
+      
+      int idx = posicoes[jogador] - 1;
+      
+      if (idx >= 0 && idx < 30) {
+        digitalWrite(pinoLeds[idx], estadoPisca ? HIGH : LOW);
+      }
+    }
+
+    if (botaoExtraPronto && digitalRead(pinoBotaoExtra) == LOW && digitalRead(pinbotao[jogador]) == HIGH && !habilidadeAtivada) {
+      unsigned long tDebounce = millis(); while (millis() - tDebounce < 80) {}
+      if (habilidadesRestantes[jogador] > 0) {
+        habilidadeAtivada = true;
+        habilidadesRestantes[jogador]--; 
+        char txtHab[17];
+        snprintf(txtHab, sizeof(txtHab), "Restam %d cartas", habilidadesRestantes[jogador]); 
+        mostrarStatusNoLCD("HAB. ATIVADA!", txtHab);
+      } else {
+        mostrarStatusNoLCD("SEM CARTAS!", "Habilidade vazia");
+      }
+      unsigned long tMsg = millis(); while (millis() - tMsg < 3000) {}
+      atualizarTabuleiroFisico(); 
+      mostrarVezNoLCD();
+      
+      unsigned long tPreso = millis();
+      while(digitalRead(pinoBotaoExtra) == LOW) { 
+        delay(10); 
+        if(millis() - tPreso > 5000) break; 
+      } 
+      botaoExtraPronto = false;
+    }
+    
+    if (botaoJogadorPronto && digitalRead(pinbotao[jogador]) == LOW && digitalRead(pinoBotaoExtra) == HIGH) {
+      unsigned long tDebounce = millis(); while (millis() - tDebounce < 80) {}
+      efeitoDadoGirando();
+      int resultado = random(1, 7);
+      
+      unsigned long tPreso = millis();
+      while(digitalRead(pinbotao[jogador]) == LOW) { 
+        delay(10); 
+        if(millis() - tPreso > 5000) break; 
+      }
+      atualizarTabuleiroFisico(); 
+      return resultado;
+    }
+  }
+}
+
+void efeitoDadoGirando() {
+  for (int i = 0; i < 6; i++) {
+    int numFalso = random(1, 7);
+    char txt[17];
+    snprintf(txt, sizeof(txt), "Girando... [%d]", numFalso);
+    mostrarStatusNoLCD("Lancando Dado", txt);
+    unsigned long t = millis(); while (millis() - t < 150) {}
+  }
+}
+
+void aguardarConfirmacaoFimDeJogada(int jogador) {
+  mostrarStatusNoLCD("Fim da jogada!", "Aperte p/ passar");
+
+  while (digitalRead(pinbotao[jogador]) == LOW) { delay(10); }
+
+  while (digitalRead(pinbotao[jogador]) == HIGH) { delay(10); }
+  unsigned long tDebounce = millis(); while (millis() - tDebounce < 80) {}
+
+  while (digitalRead(pinbotao[jogador]) == LOW) { delay(10); }
+
+  lcds[jogador]->clear();
+  lcds[jogador]->setCursor(0, 0); lcds[jogador]->print(nomeDino[jogador]);
+  lcds[jogador]->setCursor(0, 1); lcds[jogador]->print("Aguardando vez..");
+}
+
+bool verificarCartaDeAcao(int jogador) {
+  int chance = random(1, 101); 
+  if (chance > CHANCE_CARTA_ACAO) return true; 
+
+  int acao = random(1, 5); 
+
+  if (acao == 1) {
+    mostrarStatusNoLCD("CARTA: SORTE!", "Avance 1 casa");
+    { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    if (!alterarPosicaoMecanica(jogador, 1)) return false;
+  }
+  else if (acao == 2) {
+    mostrarStatusNoLCD("CARTA: AZAR!", "Volte 2 casas");
+    { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    if (!alterarPosicaoMecanica(jogador, -2)) return false;
+  }
+  else if (acao == 3) {
+    mostrarStatusNoLCD("CARTA:TERREMOTO!", "DEVOLVA 1 ITEM");
+    { unsigned long t = millis(); while (millis() - t < 3500) {} }
+    if (artefatosEquipe > 0) {
+      artefatosEquipe--;
+      mostrarStatusNoLCD("TERREMOTO!", "-1 ARTEFATO");
+    } else {
+      mostrarStatusNoLCD("TERREMOTO!", "VOCE TEM 0 ITENS");
+    }
+    { unsigned long t = millis(); while (millis() - t < 3500) {} }
+  }
+  else {
+    mostrarStatusNoLCD("CARTA: ATALHO!", "Avance 2 casas");
+    { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    if (!alterarPosicaoMecanica(jogador, 2)) return false;
+  }
+  return true;
+}
+
+bool processarMovimento(int jogador, int dado, bool usouHabilidade) {
+  char l1[17]; char l2[17];
+  bool imuneTRex = false;
+  int alvoTriceratops = -1;
+
+  if (!verificarCartaDeAcao(jogador)) {
+    return false;
+  }
+
+  if (usouHabilidade) {
+    if (jogador == 0) { imuneTRex = true; mostrarStatusNoLCD("T-REX RUGE!", "Imune a punicao"); unsigned long t0=millis(); while(millis()-t0<3000){} } 
+    else if (jogador == 1) { dado *= 2; mostrarStatusNoLCD("VELOCIRAPTOR!", "Anda o DOBRO!"); unsigned long t1=millis(); while(millis()-t1<3000){} }
+    else if (jogador == 2) { dado += 1; mostrarStatusNoLCD("PTERODACTILO!", "Pula 1 a mais"); unsigned long t2=millis(); while(millis()-t2<3000){} }
+    else if (jogador == 3) {
+      mostrarStatusNoLCD("TRICERATOPS!", "Puxando o ultimo");
+      { unsigned long t = millis(); while (millis() - t < 2500) {} }
+      int menorDist = 9999;
+      for (int i = 0; i < 4; i++) {
+        if (i != jogador) {
+          int distReal = (voltasAtuais[i] * MAX_CASAS) + posicoes[i];
+          if (distReal < menorDist) {
+            menorDist = distReal;
+            alvoTriceratops = i;
+          }
+        }
+      }
+    }
+  }
+
+  snprintf(l1, sizeof(l1), "Dado: %d", dado);
+  snprintf(l2, sizeof(l2), "Ande %d casas", dado);
+  mostrarStatusNoLCD(l1, l2);
+  { unsigned long t = millis(); while (millis() - t < 2500) {} }
+
+  if (!alterarPosicaoMecanica(jogador, dado)) {
+    return false; 
+  }
+
+  if (alvoTriceratops != -1) {
+    posicoes[alvoTriceratops] = posicoes[jogador];
+    voltasAtuais[alvoTriceratops] = voltasAtuais[jogador];
+    snprintf(l1, sizeof(l1), "Puxou %s", nomeDino[alvoTriceratops]);
+    mostrarStatusNoLCD("TRICERATOPS!", l1);
+    { unsigned long t = millis(); while (millis() - t < 2500) {} }
+    atualizarTabuleiroFisico();
+  }
+
+  if (!executarEfeitosDeCasa(jogador, imuneTRex)) {
+    return false;
+  }
+  
+  return true; 
+}
+
+bool alterarPosicaoMecanica(int jogador, int casas) {
+  posicoes[jogador] += casas;
+  if (posicoes[jogador] < 1) posicoes[jogador] = 1;
+
+  if (posicoes[jogador] >= MAX_CASAS) {
+    voltasAtuais[jogador]++; 
+
+    if (voltasAtuais[jogador] >= voltasNecessarias && artefatosEquipe >= ARTEFATOS_NECESSARIOS) {
+      posicoes[jogador] = MAX_CASAS; 
+      atualizarTabuleiroFisico();
+      processarVitoria(); 
+      return false; 
+    } else if (voltasAtuais[jogador] >= voltasMaximas) {
+      posicoes[jogador] = MAX_CASAS;
+      atualizarTabuleiroFisico();
+      processarDerrota();
+      return false;
+    } else {
+      int sobra = posicoes[jogador] - MAX_CASAS;
+      posicoes[jogador] = sobra > 0 ? sobra : 1; 
+      mostrarStatusNoLCD("MAIS UMA VOLTA!", "Busque artefatos");
+      { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    }
+  }
+  atualizarTabuleiroFisico();
+  return true; 
+}
+
+bool executarEfeitosDeCasa(int jogador, bool imuneTRex) {
+  int casaAtual = posicoes[jogador];
+  int corDaCasa = mapaTabuleiro[casaAtual - 1]; 
+
+  if (corDaCasa == 0) { 
+    mostrarStatusNoLCD("CASA AMARELA", "Terreno neutro");
+    { unsigned long t = millis(); while (millis() - t < 2500) {} }
+  } 
+  else if (corDaCasa == 1) { 
+    if (artefatosEquipe < ARTEFATOS_NECESSARIOS) {
+      artefatosEquipe++;
+      char l2art[17];
+      snprintf(l2art, sizeof(l2art), "Equipe: %d/%d itens", artefatosEquipe, ARTEFATOS_NECESSARIOS);
+      mostrarStatusNoLCD("CASA VERDE!", l2art);
+      { unsigned long t = millis(); while (millis() - t < 3000) {} }
+
+      if (artefatosEquipe >= ARTEFATOS_NECESSARIOS && voltasAtuais[jogador] >= voltasNecessarias) {
+        atualizarTabuleiroFisico();
+        processarVitoria();
+        return false;
+      }
+    } else {
+      mostrarStatusNoLCD("CASA VERDE!", "Equipe ja tem 4!");
+      { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    }
+    if (!alterarPosicaoMecanica(jogador, 1)) return false;
+  } 
+  else if (corDaCasa == 2) { 
+    if (imuneTRex) { 
+      mostrarStatusNoLCD("CASA VERMELHA", "T-REX SALVOU!"); 
+      { unsigned long t = millis(); while (millis() - t < 3000) {} }
+    } else { 
+      mostrarStatusNoLCD("CASA VERMELHA!", "Volte 1 casa!"); 
+      { unsigned long t = millis(); while (millis() - t < 3000) {} }
+      if (!alterarPosicaoMecanica(jogador, -1)) return false; 
+    }
+  }
+  return true;
+}
+
+void atualizarTabuleiroFisico() {
+  for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], LOW);
+  int idx = posicoes[jogadorAtual] - 1;
+  if (idx >= 0 && idx < 30) digitalWrite(pinoLeds[idx], HIGH);
+}
+
+void mostrarStatusNoLCD(const char* l1, const char* l2) {
+  lcds[jogadorAtual]->clear();
+  lcds[jogadorAtual]->setCursor(0, 0); lcds[jogadorAtual]->print(l1);
+  lcds[jogadorAtual]->setCursor(0, 1); lcds[jogadorAtual]->print(l2);
+}
+
+void mostrarVezNoLCD() {
+  lcds[jogadorAtual]->clear(); 
+  lcds[jogadorAtual]->setCursor(0, 0); 
+  lcds[jogadorAtual]->print(nomeDino[jogadorAtual]);
+  lcds[jogadorAtual]->print(" VEZ");
+  
+  lcds[jogadorAtual]->setCursor(0, 1);
+  char stats[17];
+  snprintf(stats, sizeof(stats), "VOLTA:%d PODER:%d", 
+           voltasAtuais[jogadorAtual], 
+           habilidadesRestantes[jogadorAtual]);
+           
+  lcds[jogadorAtual]->print(stats);
+}
+
+void modoStandby() {
+  for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], HIGH);
+
+  for (int i = 0; i < 4; i++) {
+    lcds[i]->backlight();
+    lcds[i]->clear();
+    lcds[i]->setCursor(0, 0); lcds[i]->print("FUGA VULCANICA!");
+    lcds[i]->setCursor(0, 1); lcds[i]->print("Aperte p/iniciar");
+  }
+
+  while (digitalRead(pinoBotaoExtra) == LOW) { delay(10); }
+
+  while (digitalRead(pinoBotaoExtra) == HIGH) { delay(10); }
+  unsigned long tDebounce = millis(); while (millis() - tDebounce < 80) {}
+
+  while (digitalRead(pinoBotaoExtra) == LOW) { delay(10); }
+
+  resetarJogo();
+}
+
+void processarVitoria() {
+  for (int i = 0; i < 4; i++) {
+    lcds[i]->clear();
+    lcds[i]->setCursor(0, 0); lcds[i]->print("MISSAO CUMPRIDA");
+    lcds[i]->setCursor(0, 1); lcds[i]->print("EQUIPE VENCEU!");
+  }
+
+  for (int v = 0; v < 12; v++) {
+    for (int i = 0; i < 4; i++) lcds[i]->noBacklight();
+    for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], LOW);
+    { unsigned long t = millis(); while (millis() - t < 300) {} }
+    for (int i = 0; i < 4; i++) lcds[i]->backlight();
+    for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], HIGH);
+    { unsigned long t = millis(); while (millis() - t < 300) {} }
+  }
+  { unsigned long t = millis(); while (millis() - t < 4000) {} }
+
+  modoStandby();
+}
+
+void processarDerrota() {
+  for (int i = 0; i < 4; i++) {
+    lcds[i]->clear();
+    lcds[i]->setCursor(0, 0); lcds[i]->print("VULCAO EXPLODIU!");
+    lcds[i]->setCursor(0, 1); lcds[i]->print("EQUIPE PERDEU!");
+  }
+
+  for (int v = 0; v < 16; v++) {
+    for (int i = 0; i < 4; i++) lcds[i]->noBacklight();
+    for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], LOW);
+    { unsigned long t = millis(); while (millis() - t < 120) {} }
+    for (int i = 0; i < 4; i++) lcds[i]->backlight();
+    for (int i = 0; i < 30; i++) digitalWrite(pinoLeds[i], HIGH);
+    { unsigned long t = millis(); while (millis() - t < 120) {} }
+  }
+  { unsigned long t = millis(); while (millis() - t < 4000) {} }
+
+  modoStandby();
+}
+
+void resetarJogo() {
+  artefatosEquipe = 0;
+
+  for (int i = 0; i < 4; i++) {
+    posicoes[i] = 1;
+    voltasAtuais[i] = 0;
+    habilidadesRestantes[i] = habilidadesIniciais; 
+    
+    lcds[i]->clear();
+    lcds[i]->setCursor(0, 0); lcds[i]->print(nomeDino[i]);
+    lcds[i]->setCursor(0, 1); lcds[i]->print("Aguardando...");
+
+    lcds[i]->backlight();
+  }
+  jogadorAtual = 0; 
+  precisaAtualizarLcd = true;
+  atualizarTabuleiroFisico();                  
+}
